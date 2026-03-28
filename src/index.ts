@@ -11,19 +11,19 @@ interface Env {
   ENGINE_RUNTIME: Fetcher;
   SHARED_BRAIN: Fetcher;
   ECHO_API_KEY: string;
+  AE: AnalyticsEngineDataset;
 }
 
 interface RLState { c: number; t: number }
 
 function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*' , 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'X-XSS-Protection': '1; mode=block', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' }
+  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*' , 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'X-XSS-Protection': '1; mode=block', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } });
+}
 
 function slog(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) {
   const entry = { ts: new Date().toISOString(), level, worker: 'echo-podcast', version: '1.0.0', msg, ...data };
   if (level === 'error') console.error(JSON.stringify(entry));
   else console.log(JSON.stringify(entry));
-}
- });
 }
 
 function sanitize(s: string | null | undefined, max = 500): string {
@@ -88,6 +88,7 @@ export default {
     const url = new URL(req.url);
     const p = url.pathname;
     const m = req.method;
+    try { env.AE.writeDataPoint({ blobs: [m, p, '200'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
 
     try {
       if (p === '/health' || p === '/') return json({ status: 'ok', service: 'echo-podcast', version: '1.0.0', timestamp: new Date().toISOString() });
@@ -482,14 +483,18 @@ ${episode?.image_url || show?.image_url ? `<img class="art" src="${episode?.imag
         return json({ success: true, data: rows.results });
       }
 
-      return json({ error: 'Not found', path: p, endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai'] }, 404);
+      const notFoundRes = json({ error: 'Not found', path: p, endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai'] }, 404);
+      try { env.AE.writeDataPoint({ blobs: [req.method, url.pathname, '404'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
+      return notFoundRes;
 
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Internal error';
       if (msg.includes('JSON')) {
+        try { env.AE.writeDataPoint({ blobs: [req.method, new URL(req.url).pathname, '400'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
         return json({ error: 'Invalid JSON body' }, 400);
       }
       console.error(`[echo-podcast] Unhandled error: ${msg}`);
+      try { env.AE.writeDataPoint({ blobs: [req.method, new URL(req.url).pathname, '500'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
       return json({ error: 'Internal server error' }, 500);
     }
   },
