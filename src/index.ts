@@ -82,7 +82,7 @@ function detectApp(ua: string): string {
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*' } });
 
     const url = new URL(req.url);
@@ -178,13 +178,13 @@ export default {
         const episode = await env.DB.prepare('SELECT * FROM episodes WHERE id = ?').bind(epId).first();
         if (!episode) return json({ error: 'Episode not found' }, 404);
 
-        // Record download async
+        // Record download (ctx.waitUntil to prevent data loss)
         const ua = req.headers.get('User-Agent') || '';
-        (async () => {
+        ctx.waitUntil((async () => {
           await env.DB.prepare('INSERT INTO downloads (episode_id, show_id, ip_hash, user_agent, country, city, device, app) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(epId, episode.show_id, (req.headers.get('CF-Connecting-IP') || '').slice(0, 8), sanitize(ua, 200), req.headers.get('CF-IPCountry') || '', req.headers.get('CF-IPCity') || '', /mobile/i.test(ua) ? 'mobile' : 'desktop', detectApp(ua)).run();
           await env.DB.prepare('UPDATE episodes SET total_downloads = total_downloads + 1 WHERE id = ?').bind(epId).run();
           await env.DB.prepare('UPDATE shows SET total_downloads = total_downloads + 1 WHERE id = ?').bind(episode.show_id).run();
-        })();
+        })());
 
         // If audio_key exists, serve from R2
         if (episode.audio_key) {
