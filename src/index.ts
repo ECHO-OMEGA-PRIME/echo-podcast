@@ -91,7 +91,8 @@ export default {
     try { env.AE.writeDataPoint({ blobs: [m, p, '200'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
 
     try {
-      if (p === '/health' || p === '/') return json({ status: 'ok', service: 'echo-podcast', version: '1.0.0', timestamp: new Date().toISOString() });
+      if (p === '/') return json({ name: 'echo-podcast', status: 'ok', version: '1.0.0', docs: '/health', timestamp: new Date().toISOString() });
+      if (p === '/health') return json({ status: 'ok', service: 'echo-podcast', version: '1.0.0', timestamp: new Date().toISOString() });
 
       /* ══════════════════ PUBLIC ══════════════════ */
 
