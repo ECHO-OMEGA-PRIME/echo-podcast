@@ -479,7 +479,11 @@ ${episode?.image_url || show?.image_url ? `<img class="art" src="${episode?.imag
 
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Internal error';
-      return json({ error: msg }, 500);
+      if (msg.includes('JSON')) {
+        return json({ error: 'Invalid JSON body' }, 400);
+      }
+      console.error(`[echo-podcast] ${msg}`);
+      return json({ error: 'Internal server error' }, 500);
     }
   },
 
