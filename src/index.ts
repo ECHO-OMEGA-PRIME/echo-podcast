@@ -151,7 +151,14 @@ export default {
       if (m === 'GET' && p.match(/^\/show\/[a-z0-9-]+$/)) {
         const slug = p.split('/')[2];
         const show = await env.DB.prepare('SELECT * FROM shows WHERE slug = ? AND status = ?').bind(slug, 'active').first();
-        if (!show) return json({ error: 'Not found' }, 404);
+        if (!show) } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      const stack = err instanceof Error ? err.stack : undefined;
+      slog('error', 'Unhandled request error', { method: m, path: p, error: msg, stack });
+      return json({ error: 'Internal server error', message: msg, path: p }, 500);
+    }
+
+    return json({ error: 'Not found' }, 404);
         const episodes = await env.DB.prepare("SELECT id, title, slug, description, audio_url, duration_sec, season, episode_number, episode_type, image_url, published_at, total_downloads FROM episodes WHERE show_id = ? AND status = 'published' AND published_at <= datetime('now') ORDER BY published_at DESC LIMIT 50").bind(show.id).all();
         return json({ success: true, data: { show, episodes: episodes.results, feed_url: `https://echo-podcast.bmcii1976.workers.dev/feed/${slug}` } });
       }
@@ -175,7 +182,14 @@ export default {
         if (await rateLimit(env.PC_CACHE, `dl:${req.headers.get('CF-Connecting-IP') || 'u'}`, 30, 60)) return json({ error: 'Rate limited' }, 429);
 
         const episode = await env.DB.prepare('SELECT * FROM episodes WHERE id = ?').bind(epId).first();
-        if (!episode) return json({ error: 'Not found' }, 404);
+        if (!episode) } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      const stack = err instanceof Error ? err.stack : undefined;
+      slog('error', 'Unhandled request error', { method: m, path: p, error: msg, stack });
+      return json({ error: 'Internal server error', message: msg, path: p }, 500);
+    }
+
+    return json({ error: 'Not found' }, 404);
 
         // Record download async
         const ua = req.headers.get('User-Agent') || '';
@@ -260,7 +274,8 @@ ${episode?.image_url || show?.image_url ? `<img class="art" src="${episode?.imag
       }
 
       /* ══════════════════ AUTH REQUIRED ══════════════════ */
-      if (!authOk(req, env)) return json({ error: 'Unauthorized' }, 401);
+      try {
+    if (!authOk(req, env)) return json({ error: 'Unauthorized' }, 401);
 
       /* ── Shows CRUD ── */
       if (m === 'GET' && p === '/shows') {
