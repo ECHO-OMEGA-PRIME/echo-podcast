@@ -475,14 +475,14 @@ ${episode?.image_url || show?.image_url ? `<img class="art" src="${episode?.imag
         return json({ success: true, data: rows.results });
       }
 
-      return json({ error: 'Not found', endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai'] }, 404);
+      return json({ error: 'Not found', path: p, endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai'] }, 404);
 
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Internal error';
       if (msg.includes('JSON')) {
         return json({ error: 'Invalid JSON body' }, 400);
       }
-      console.error(`[echo-podcast] ${msg}`);
+      console.error(`[echo-podcast] Unhandled error: ${msg}`);
       return json({ error: 'Internal server error' }, 500);
     }
   },
