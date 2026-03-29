@@ -12,6 +12,29 @@ interface Env {
   SHARED_BRAIN: Fetcher;
   ECHO_API_KEY: string;
   AE: AnalyticsEngineDataset;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+}
+
+const PODCAST_PLANS = [
+  { id: 'free', name: 'Free', price: 0, max_shows: 1, max_episodes: 20, max_storage_mb: 500, display: 'Free' },
+  { id: 'creator', name: 'Creator', price: 1499, max_shows: 3, max_episodes: 200, max_storage_mb: 5000, display: '$14.99/mo' },
+  { id: 'pro', name: 'Pro', price: 4999, max_shows: 10, max_episodes: 1000, max_storage_mb: 50000, display: '$49.99/mo' },
+  { id: 'network', name: 'Network', price: 14999, max_shows: -1, max_episodes: -1, max_storage_mb: -1, display: '$149.99/mo' },
+] as const;
+
+async function verifyStripeSignature(payload: string, sigHeader: string, secret: string): Promise<boolean> {
+  const parts: Record<string, string> = {};
+  for (const p of sigHeader.split(',')) { const eq = p.indexOf('='); if (eq > 0) parts[p.slice(0, eq).trim()] = p.slice(eq + 1).trim(); }
+  const ts = parts['t']; const v1 = parts['v1'];
+  if (!ts || !v1) return false;
+  if (Math.abs(Date.now() / 1000 - parseInt(ts)) > 300) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${ts}.${payload}`));
+  const expected = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (expected.length !== v1.length) return false;
+  let diff = 0; for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ v1.charCodeAt(i);
+  return diff === 0;
 }
 
 interface RLState { c: number; t: number }
@@ -21,7 +44,7 @@ function json(data: unknown, status = 200): Response {
 }
 
 function slog(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) {
-  const entry = { ts: new Date().toISOString(), level, worker: 'echo-podcast', version: '1.0.0', msg, ...data };
+  const entry = { ts: new Date().toISOString(), level, worker: 'echo-podcast', version: '2.0.0', msg, ...data };
   if (level === 'error') console.error(JSON.stringify(entry));
   else console.log(JSON.stringify(entry));
 }
@@ -91,8 +114,8 @@ export default {
     try { env.AE.writeDataPoint({ blobs: [m, p, '200'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
 
     try {
-      if (p === '/') return json({ name: 'echo-podcast', status: 'ok', version: '1.0.0', docs: '/health', timestamp: new Date().toISOString() });
-      if (p === '/health') return json({ status: 'ok', service: 'echo-podcast', version: '1.0.0', timestamp: new Date().toISOString() });
+      if (p === '/') return json({ name: 'echo-podcast', status: 'ok', version: '2.0.0', docs: '/health', timestamp: new Date().toISOString() });
+      if (p === '/health') return json({ status: 'ok', service: 'echo-podcast', version: '2.0.0', stripe: !!env.STRIPE_SECRET_KEY, timestamp: new Date().toISOString() });
 
       /* ══════════════════ PUBLIC ══════════════════ */
 
@@ -484,7 +507,82 @@ ${episode?.image_url || show?.image_url ? `<img class="art" src="${episode?.imag
         return json({ success: true, data: rows.results });
       }
 
-      const notFoundRes = json({ error: 'Not found', path: p, endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai'] }, 404);
+      /* ══════════════════ STRIPE PAYMENT ══════════════════ */
+
+      if (m === 'GET' && p === '/plans') return json({ success: true, data: PODCAST_PLANS });
+
+      if (m === 'POST' && p === '/webhooks/stripe') {
+        if (!env.STRIPE_WEBHOOK_SECRET) return json({ error: 'Stripe not configured' }, 503);
+        const body = await req.text();
+        const sig = req.headers.get('Stripe-Signature') || '';
+        if (!await verifyStripeSignature(body, sig, env.STRIPE_WEBHOOK_SECRET)) return json({ error: 'Invalid signature' }, 401);
+        const event = JSON.parse(body);
+        slog('info', 'Stripe webhook', { type: event.type, id: event.id });
+        if (event.type === 'checkout.session.completed') {
+          const session = event.data.object;
+          const tenantId = session.metadata?.tenant_id;
+          const planId = session.metadata?.plan;
+          if (tenantId && planId) {
+            const plan = PODCAST_PLANS.find(p => p.id === planId);
+            if (plan) {
+              await env.DB.prepare(`UPDATE tenants SET plan=?1, max_shows=?2, stripe_customer_id=?3, stripe_subscription_id=?4 WHERE id=?5`)
+                .bind(planId, plan.max_shows, session.customer, session.subscription, tenantId).run();
+            }
+          }
+        } else if (event.type === 'customer.subscription.deleted') {
+          await env.DB.prepare(`UPDATE tenants SET plan='free', max_shows=1, stripe_subscription_id=NULL WHERE stripe_subscription_id=?1`)
+            .bind(event.data.object.id).run();
+        }
+        try { env.AE.writeDataPoint({ blobs: ['stripe_webhook', event.type, ''], doubles: [(event.data?.object?.amount_total || 0) / 100], indexes: ['echo-podcast'] }); } catch {}
+        return json({ received: true });
+      }
+
+      if (m === 'POST' && p === '/plans/upgrade') {
+        if (!authOk(req, env)) return json({ error: 'Unauthorized' }, 401);
+        if (!env.STRIPE_SECRET_KEY) return json({ error: 'Payments not configured' }, 503);
+        const body = await req.json() as any;
+        if (!body.tenant_id || !body.plan) return json({ error: 'tenant_id and plan required' }, 400);
+        const target = PODCAST_PLANS.find(p => p.id === body.plan);
+        if (!target || target.price === 0) return json({ error: 'Invalid plan' }, 400);
+        const params = new URLSearchParams();
+        params.append('mode', 'subscription');
+        params.append('payment_method_types[0]', 'card');
+        params.append('line_items[0][price_data][currency]', 'usd');
+        params.append('line_items[0][price_data][product_data][name]', `Echo Podcast — ${target.name}`);
+        params.append('line_items[0][price_data][unit_amount]', String(target.price));
+        params.append('line_items[0][price_data][recurring][interval]', 'month');
+        params.append('line_items[0][quantity]', '1');
+        params.append('success_url', body.success_url || 'https://echo-prime-tech.com/podcast?upgraded=true');
+        params.append('cancel_url', body.cancel_url || 'https://echo-prime-tech.com/podcast/pricing');
+        params.append('metadata[tenant_id]', body.tenant_id);
+        params.append('metadata[plan]', body.plan);
+        const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+        if (!resp.ok) return json({ error: 'Payment service error' }, 502);
+        const session = await resp.json() as any;
+        return json({ success: true, checkout_url: session.url, session_id: session.id });
+      }
+
+      if (m === 'POST' && p === '/admin/migrate-stripe') {
+        if (!authOk(req, env)) return json({ error: 'Unauthorized' }, 401);
+        try {
+          await env.DB.batch([
+            env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT"),
+            env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_subscription_id TEXT"),
+            env.DB.prepare("ALTER TABLE tenants ADD COLUMN plan TEXT DEFAULT 'free'"),
+            env.DB.prepare("ALTER TABLE tenants ADD COLUMN max_shows INTEGER DEFAULT 1"),
+            env.DB.prepare("ALTER TABLE tenants ADD COLUMN plan_expires_at TEXT"),
+          ]);
+          return json({ success: true, message: 'Stripe columns added' });
+        } catch (e: any) {
+          return json({ success: true, message: 'Columns may already exist', detail: e.message });
+        }
+      }
+
+      const notFoundRes = json({ error: 'Not found', path: p, endpoints: ['/health', '/feed/:slug', '/show/:slug', '/audio/:id', '/shows', '/episodes', '/embed', '/analytics', '/ai', '/plans', '/webhooks/stripe'] }, 404);
       try { env.AE.writeDataPoint({ blobs: [req.method, url.pathname, '404'], doubles: [Date.now()], indexes: ['echo-podcast'] }); } catch {}
       return notFoundRes;
 
